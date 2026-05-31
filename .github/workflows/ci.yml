@@ -5,7 +5,8 @@ on:
   push:
     branches: main
 
-permissions: {}
+permissions:
+  contents: read # required to check out the private repository
 
 jobs:
   test:
