@@ -285,6 +285,120 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_non_default_table_cell_is_silently_overwritten() {
+        use pasta_curves::EqAffine;
+        use rand_core::OsRng;
+
+        use crate::{
+            plonk::{create_proof, keygen_pk, keygen_vk, verify_proof, SingleVerifier},
+            poly::commitment::Params,
+            transcript::{Blake2bRead, Blake2bWrite, Challenge255},
+        };
+
+        const K: u32 = 4;
+
+        #[derive(Clone)]
+        struct FaultyCircuitConfig {
+            advice: crate::plonk::Column<crate::plonk::Advice>,
+            table: TableColumn,
+        }
+
+        #[derive(Clone)]
+        struct FaultyCircuit;
+
+        impl Circuit<Fp> for FaultyCircuit {
+            type Config = FaultyCircuitConfig;
+
+            type FloorPlanner = SimpleFloorPlanner;
+
+            fn without_witnesses(&self) -> Self {
+                Self
+            }
+
+            fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+                let advice = meta.advice_column();
+                let table = meta.lookup_table_column();
+
+                meta.lookup(|cells| {
+                    let advice = cells.query_advice(advice, Rotation::cur());
+                    vec![(advice, table)]
+                });
+
+                Self::Config { advice, table }
+            }
+
+            fn synthesize(
+                &self,
+                config: Self::Config,
+                mut layouter: impl Layouter<Fp>,
+            ) -> Result<(), Error> {
+                layouter.assign_table(
+                    || "table with duplicate non-default row",
+                    |mut table| {
+                        table.assign_cell(
+                            || "default row",
+                            config.table,
+                            0,
+                            || Value::known(Fp::zero()),
+                        )?;
+                        table.assign_cell(
+                            || "first row-1 assignment",
+                            config.table,
+                            1,
+                            || Value::known(Fp::one()),
+                        )?;
+                        table.assign_cell(
+                            || "second row-1 assignment",
+                            config.table,
+                            1,
+                            || Value::known(Fp::from(2)),
+                        )
+                    },
+                )?;
+
+                layouter.assign_region(
+                    || "lookup overwritten value",
+                    |mut region| {
+                        region.assign_advice(
+                            || "advice = 2",
+                            config.advice,
+                            0,
+                            || Value::known(Fp::from(2)),
+                        )?;
+                        Ok(())
+                    },
+                )
+            }
+        }
+
+        let prover = MockProver::run(K, &FaultyCircuit, vec![])
+            .expect("duplicate non-default table assignment is accepted");
+        assert_eq!(prover.verify(), Ok(()));
+
+        let params: Params<EqAffine> = Params::new(K);
+        let vk = keygen_vk(&params, &FaultyCircuit)
+            .expect("keygen_vk commits the overwritten fixed table");
+        let pk = keygen_pk(&params, vk, &FaultyCircuit).expect("keygen_pk should not fail");
+
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        create_proof(
+            &params,
+            &pk,
+            &[FaultyCircuit],
+            &[&[]],
+            OsRng,
+            &mut transcript,
+        )
+        .expect("proof is created for the overwritten table");
+        let proof = transcript.finalize();
+
+        let strategy = SingleVerifier::new(&params);
+        let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+        verify_proof(&params, pk.get_vk(), strategy, &[&[]], &mut transcript)
+            .expect("verifier accepts the proof using the overwritten table");
+    }
+
+    #[test]
     fn table_reuse_column() {
         const K: u32 = 4;
 

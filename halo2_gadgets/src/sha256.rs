@@ -164,3 +164,80 @@ impl<F: Field, Sha256Chip: Sha256Instructions<F>> Sha256<F, Sha256Chip> {
         hasher.finalize(layouter.namespace(|| "finalize"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Sha256, Table16Chip, Table16Config};
+    use halo2_proofs::{
+        circuit::{Layouter, SimpleFloorPlanner},
+        dev::MockProver,
+        pasta::pallas,
+        plonk::{Circuit, ConstraintSystem, Error},
+    };
+
+    const SHA256_EMPTY: [u32; 8] = [
+        0xe3b0_c442,
+        0x98fc_1c14,
+        0x9afb_f4c8,
+        0x996f_b924,
+        0x27ae_41e4,
+        0x649b_934c,
+        0xa495_991b,
+        0x7852_b855,
+    ];
+
+    const SHA256_IV: [u32; 8] = [
+        0x6a09_e667,
+        0xbb67_ae85,
+        0x3c6e_f372,
+        0xa54f_f53a,
+        0x510e_527f,
+        0x9b05_688c,
+        0x1f83_d9ab,
+        0x5be0_cd19,
+    ];
+
+    #[test]
+    fn digest_empty_input_returns_initialization_vector_not_sha256_digest() {
+        struct MyCircuit;
+
+        impl Circuit<pallas::Base> for MyCircuit {
+            type Config = Table16Config;
+            type FloorPlanner = SimpleFloorPlanner;
+
+            fn without_witnesses(&self) -> Self {
+                Self
+            }
+
+            fn configure(meta: &mut ConstraintSystem<pallas::Base>) -> Self::Config {
+                Table16Chip::configure(meta)
+            }
+
+            fn synthesize(
+                &self,
+                config: Self::Config,
+                mut layouter: impl Layouter<pallas::Base>,
+            ) -> Result<(), Error> {
+                Table16Chip::load(config.clone(), &mut layouter)?;
+
+                let digest = Sha256::digest(
+                    Table16Chip::construct(config),
+                    layouter.namespace(|| "empty input"),
+                    &[],
+                )?;
+
+                for (idx, word) in digest.0.iter().enumerate() {
+                    word.0.assert_if_known(|word| {
+                        *word == SHA256_IV[idx] && *word != SHA256_EMPTY[idx]
+                    });
+                }
+
+                Ok(())
+            }
+        }
+
+        let prover = MockProver::<pallas::Base>::run(17, &MyCircuit, vec![])
+            .expect("SHA-256 empty-input reproducer should synthesize");
+        assert_eq!(prover.verify(), Ok(()));
+    }
+}

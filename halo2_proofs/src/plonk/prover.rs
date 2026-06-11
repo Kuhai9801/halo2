@@ -784,3 +784,85 @@ fn test_create_proof() {
     )
     .expect("proof generation should not fail");
 }
+
+#[test]
+fn create_proof_rejects_instance_row_that_mock_prover_zero_pads() {
+    use crate::{
+        circuit::{Layouter, SimpleFloorPlanner},
+        dev::MockProver,
+        plonk::{keygen_pk, keygen_vk, Advice, Column, Instance},
+        transcript::{Blake2bWrite, Challenge255},
+    };
+    use pasta_curves::{EqAffine, Fp};
+    use rand_core::OsRng;
+
+    #[derive(Clone, Copy)]
+    struct Config {
+        advice: Column<Advice>,
+        instance: Column<Instance>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ReadsSecondInstanceRow;
+
+    impl Circuit<Fp> for ReadsSecondInstanceRow {
+        type Config = Config;
+
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            *self
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            let advice = meta.advice_column();
+            let instance = meta.instance_column();
+            meta.enable_equality(advice);
+            meta.enable_equality(instance);
+
+            Config { advice, instance }
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fp>,
+        ) -> Result<(), Error> {
+            layouter.assign_region(
+                || "read zero-padded instance row",
+                |mut region| {
+                    region.assign_advice_from_instance(
+                        || "instance row 1",
+                        config.instance,
+                        1,
+                        config.advice,
+                        0,
+                    )?;
+                    Ok(())
+                },
+            )
+        }
+    }
+
+    let circuit = ReadsSecondInstanceRow;
+    let instances = vec![vec![Fp::zero()]];
+
+    let prover = MockProver::run(3, &circuit, instances.clone())
+        .expect("MockProver zero-pads missing instance rows");
+    assert_eq!(prover.verify(), Ok(()));
+
+    let params: Params<EqAffine> = Params::new(3);
+    let vk = keygen_vk(&params, &circuit).expect("keygen_vk should not fail");
+    let pk = keygen_pk(&params, vk, &circuit).expect("keygen_pk should not fail");
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    let proof = create_proof(
+        &params,
+        &pk,
+        &[circuit],
+        &[&[&instances[0][..]]],
+        OsRng,
+        &mut transcript,
+    );
+
+    assert!(matches!(proof.unwrap_err(), Error::BoundsFailure));
+}
